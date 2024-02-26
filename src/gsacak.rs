@@ -9,12 +9,14 @@ pub trait Alphabet<T> {
 }
 
 pub fn count_characters(text: &[u8], table: &Table) -> Vec<u32> {
-    text.iter().fold(vec![0; table.len()], |mut counts, c| {
-        let a = table.get(c).expect("Unknown character in text");
-        counts[*a] += 1;
+    let mut counts = vec![0u32; table.len()];
 
-        counts
-    })
+    for c in text {
+        let index = *table.get(c).unwrap();
+        counts[index] += 1;
+    }
+
+    counts
 }
 
 pub fn get_buckets(counts: &[u32], buckets: &mut [u32], end: bool) {
@@ -41,13 +43,13 @@ fn put_lms_substring_level0(
     let n = text.len();
     let mut previous_is_s_type = false;
     for i in (1..(n - 1)).rev() {
-        let c1 = table.get(&text[i - 1]).unwrap();
-        let c2 = table.get(&text[i]).unwrap();
+        let &c1 = table.get(&text[i - 1]).unwrap();
+        let &c2 = table.get(&text[i]).unwrap();
 
-        let current_is_s_type = *c1 < *c2 || *c1 == *c2 && previous_is_s_type;
+        let current_is_s_type = c1 < c2 || c1 == c2 && previous_is_s_type;
         if !current_is_s_type && previous_is_s_type {
-            suffix_array[buckets[*c2] as usize] = i as u32;
-            buckets[*c2] -= 1;
+            suffix_array[buckets[c2] as usize] = i as u32;
+            buckets[c2] -= 1;
         }
         previous_is_s_type = current_is_s_type;
     }
@@ -71,21 +73,21 @@ fn put_lms_substring_leveln(text: &[u32], suffix_array: &mut [u32]) {
             || (current_character == next_character && successor_is_s_type);
 
         if !current_is_s_type && successor_is_s_type {
-            if suffix_array[next_character] as i32 >= 0 {
-                let mut prev = suffix_array[next_character];
-                let mut h = next_character + 1;
-                let iter = suffix_array[h..]
-                    .iter_mut()
-                    .take_while(|&&mut s| s as i32 >= 0);
-                for s in iter {
-                    (*s, prev) = (prev, *s);
-                    h += 1;
-                }
-                suffix_array[h] = prev;
-                suffix_array[next_character] = EMPTY as u32;
+            let mut d = suffix_array[next_character] as i32;
+
+            if d >= 0 {
+                let counter = suffix_array[next_character..]
+                    .iter()
+                    .enumerate()
+                    .find(|&(_, &x)| (x as i32) < 0 && (x as i32) != EMPTY)
+                    .unwrap()
+                    .0
+                    + next_character;
+                suffix_array[next_character..=counter].rotate_right(1);
+                // suffix_array[next_character] = EMPTY as u32;
+                d = EMPTY;
             }
 
-            let d = suffix_array[next_character] as i32;
             if d == EMPTY {
                 if suffix_array[next_character - 1] as i32 == EMPTY {
                     suffix_array[next_character] = -1i32 as u32;
@@ -118,15 +120,19 @@ fn put_lms_substring_leveln(text: &[u32], suffix_array: &mut [u32]) {
     suffix_array[0] = n as u32 - 1;
 }
 
-fn put_suffix_level0(text: &[u8], suffix_array: &mut [u32], buckets: &mut [u32], table: &Table) {
-    let n = suffix_array.len();
-
-    for i in (1..n).rev() {
+fn put_suffix_level0(
+    text: &[u8],
+    suffix_array: &mut [u32],
+    buckets: &mut [u32],
+    table: &Table,
+    n1: usize,
+) {
+    for i in (1..n1).rev() {
         let j = suffix_array[i] as usize;
         suffix_array[i] = 0;
-        let c = table.get(&text[j]).unwrap();
-        suffix_array[buckets[*c] as usize] = j as u32;
-        buckets[*c] -= 1;
+        let &c = table.get(&text[j]).unwrap();
+        suffix_array[buckets[c] as usize] = j as u32;
+        buckets[c] -= 1;
     }
     suffix_array[0] = text.len() as u32 - 1;
 }
@@ -203,22 +209,17 @@ fn induce_l_type_leveln(text: &[u32], suffix_array: &mut [u32], suffix: bool) {
 
         let mut d = suffix_array[current] as i32;
         if d >= 0 {
-            let mut prev = suffix_array[current];
-            let mut counter = current - 1;
-            let bucket_iter = suffix_array[0..current]
-                .iter_mut()
-                .rev()
-                .take_while(|&&mut s| (s as i32) >= 0 || s as i32 == EMPTY);
-            for s in bucket_iter {
-                (prev, *s) = (*s, prev);
-                counter -= 1;
-            }
-
-            suffix_array[counter] = prev;
-            d = EMPTY;
+            let counter = suffix_array[..current]
+                .iter()
+                .enumerate()
+                .rfind(|&(_, &x)| (x as i32) < 0 && (x as i32) != EMPTY)
+                .unwrap()
+                .0;
+            suffix_array[counter..=current].rotate_left(1);
             if counter < i {
                 step = 0;
             }
+            d = EMPTY;
         }
 
         if d == EMPTY {
@@ -250,6 +251,7 @@ fn induce_l_type_leveln(text: &[u32], suffix_array: &mut [u32], suffix: bool) {
         }
         i += step;
     }
+
     for i in 1..n {
         let j = suffix_array[i] as i32;
         if j < 0 && j != EMPTY {
@@ -272,9 +274,11 @@ fn induce_s_type_leveln(text: &[u32], suffix_array: &mut [u32], suffix: bool) {
             i -= step;
             continue;
         }
+
         let j = suffix_array[i] as usize - 1;
         let (current, next) = (text[j] as usize, text[j + 1] as usize);
         let is_s_type = current < next || (current == next && current > i);
+
         if !is_s_type {
             i -= step;
             continue;
@@ -283,16 +287,14 @@ fn induce_s_type_leveln(text: &[u32], suffix_array: &mut [u32], suffix: bool) {
         let mut d = suffix_array[current] as i32;
 
         if d >= 0 {
-            let mut prev = suffix_array[current];
-            let mut counter = current + 1;
-            let iter = &mut suffix_array[counter..]
-                .iter_mut()
-                .take_while(|&&mut s| (s as i32) >= 0 || s as i32 == EMPTY);
-            for s in iter {
-                (*s, prev) = (prev, *s);
-                counter += 1;
-            }
-            suffix_array[counter] = prev;
+            let counter = suffix_array[current..]
+                .iter()
+                .enumerate()
+                .find(|&(_, &x)| (x as i32) < 0 && (x as i32) != EMPTY)
+                .unwrap()
+                .0
+                + current;
+            suffix_array[current..=counter].rotate_right(1);
             if counter > i {
                 step = 0;
             }
@@ -337,7 +339,11 @@ fn induce_s_type_leveln(text: &[u32], suffix_array: &mut [u32], suffix: bool) {
     }
 }
 
-fn name_lms_substrings<T: PartialOrd + Debug>(text: &[T], suffix_array: &mut [u32], n1: usize) -> usize {
+fn name_lms_substrings<T: PartialOrd + Debug>(
+    text: &[T],
+    suffix_array: &mut [u32],
+    n1: usize,
+) -> usize {
     let mut name_counter = 0;
 
     {
@@ -403,7 +409,7 @@ fn get_suffix_array_lms<T: PartialOrd + Debug>(
     let n = text.len();
 
     text1[j] = (n - 1) as u32;
-    j -= 1;
+    j = j.saturating_sub(1);
     let mut successor_is_s_type = false;
     for i in (1..(n - 1)).rev() {
         let current_is_s_type =
@@ -456,7 +462,7 @@ fn sacak_leveln(text: &[u32], suffix_array: &mut [u32]) {
     put_lms_substring_leveln(text, suffix_array);
     induce_l_type_leveln(text, suffix_array, false);
     induce_s_type_leveln(text, suffix_array, false);
-    dbg!(&suffix_array);
+
     let mut n1 = 0;
     for i in 0..suffix_array.len() {
         if suffix_array[i] as i32 > 0 {
@@ -485,8 +491,6 @@ fn put_suffix_leveln(text: &[u32], suffix_array: &mut [u32], n1: usize) {
     let mut prev = -1;
     let mut pos = 0;
 
-    // dbg!(&suffix_array);
-    // dbg!(&text);
     for i in (1..n1).rev() {
         let j = suffix_array[i];
 
@@ -524,20 +528,22 @@ fn sacak0(text: &[u8], suffix_array: &mut [u32], table: Table) {
         }
     }
 
-    let name_counter = name_lms_substrings(text, suffix_array, n1);
-    let (suffix_array1, text1) = suffix_array.split_at_mut(suffix_array.len() - n1);
+    {
+        let name_counter = name_lms_substrings(text, suffix_array, n1); //
+        let (suffix_array1, text1) = suffix_array.split_at_mut(suffix_array.len() - n1);
 
-    if name_counter < n1 {
-        sacak_leveln(text1, suffix_array1);
-    } else {
-        for i in 0..n1 {
-            suffix_array1[text1[i] as usize] = i as u32;
+        if name_counter < n1 {
+            sacak_leveln(text1, suffix_array1);
+        } else {
+            for i in 0..n1 {
+                suffix_array1[text1[i] as usize] = i as u32;
+            }
         }
+        get_suffix_array_lms(text, suffix_array1, text1, true);
     }
-    get_suffix_array_lms(text, suffix_array1, text1, true);
 
     get_buckets(&counts, &mut buckets, true);
-    put_suffix_level0(text, &mut suffix_array[0..n1], &mut buckets, &table);
+    put_suffix_level0(text, suffix_array, &mut buckets, &table, n1);
 
     get_buckets(&counts, &mut buckets, false);
     induce_l_type_level0(text, suffix_array, &mut buckets, &table, true);
@@ -564,35 +570,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn count_chars() {
-        // let map: Vec<(u8, usize)> = vec![
-        //     ('\0' as u8, 0),
-        //     ('A' as u8, 1),
-        //     ('C' as u8, 2),
-        //     ('G' as u8, 3),
-        //     ('T' as u8, 4),
-        // ];
+    fn test_saca_k() {
         let map: Vec<(u8, usize)> = vec![
             ('\0' as u8, 0),
-            ('I' as u8, 1),
-            ('M' as u8, 2),
-            ('P' as u8, 3),
-            ('S' as u8, 4),
+            ('A' as u8, 1),
+            ('C' as u8, 2),
+            ('G' as u8, 3),
+            ('T' as u8, 4),
+            ('N' as u8, 5),
         ];
 
         let table = map.into_iter().collect::<Table>();
-        // let data = "TTCGGCGGTACATCAGTGGCAAATGCAGAACGTTTTCTGCGGGTTGCCGATATTCTGGAAAGCAATGCCAGGCAGGGGCAGGTGGCCACCGTCCTCTCTGCCCCCGCCAAAATCACCAACCATCTGGTAGCGATGATTGA\0";
-        let data = "MMIISSIISSIIPPII\0";
+        let text = "TTCGGCGGTACATCAGTGGCAAATGCAGAACGTTTTCTGCGGGTTGCCGATATTCTGGAAAGCAATGCCAGGCAGGGGCAGGTGGCCACCGTCCTCTCTGCCCCCGCCAAAATCACCAACCATCTGGTAGCGATGATTGA\0";
 
-        let counts = count_characters(data.as_bytes(), &table);
-        let sa = sacak(data, table);
-        assert_eq!(counts[0], 17);
+        let sa = sacak(text, table);
+        let result = &[
+            140, 139, 108, 58, 109, 20, 117, 28, 59, 110, 21, 63, 9, 114, 118, 87, 29, 26, 60, 128,
+            69, 73, 79, 14, 49, 111, 11, 121, 132, 22, 64, 51, 135, 107, 19, 116, 62, 113, 86, 25,
+            68, 72, 78, 13, 10, 120, 106, 115, 85, 67, 119, 100, 101, 102, 46, 103, 88, 92, 47,
+            130, 104, 2, 39, 5, 89, 30, 93, 95, 97, 36, 54, 123, 138, 57, 27, 48, 131, 134, 18, 61,
+            24, 71, 77, 105, 84, 66, 99, 45, 129, 38, 4, 56, 17, 70, 76, 83, 3, 75, 74, 40, 6, 125,
+            80, 41, 7, 126, 90, 15, 81, 42, 31, 8, 127, 50, 112, 12, 91, 1, 94, 96, 35, 53, 122,
+            137, 133, 23, 65, 98, 44, 37, 55, 16, 82, 124, 0, 34, 52, 136, 43, 33, 32,
+        ];
+
+        assert_eq!(&sa, result);
     }
-
-    // #[test]
-    // fn test_lms_length() {
-    //     let string = "cinnut\0";
-
-    //     assert_eq!(3, get_length_of_lms_substring(&string.as_bytes()));
-    // }
 }
