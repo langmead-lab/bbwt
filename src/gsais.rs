@@ -1,45 +1,21 @@
+use crate::utils::compute_lcp_phi_sparse;
+use crate::utils::Character;
+use crate::utils::StackRMQ;
+
+use num::{Signed, NumCast};
+use num_traits::{MulAddAssign, PrimInt, NumAssign};
 use std::fmt::Debug;
 
-trait Character: Copy + Ord + Debug {
-    fn to_usize(self) -> usize;
-
-    fn zero() -> Self;
-}
-
-impl Character for i32 {
-    #[inline]
-    fn to_usize(self) -> usize {
-        self as usize
-    }
-
-    #[inline]
-    fn zero() -> i32 {
-        0
-    }
-}
-
-impl Character for u8 {
-    #[inline]
-    fn to_usize(self) -> usize {
-        self as usize
-    }
-
-    #[inline]
-    fn zero() -> u8 {
-        0
-    }
-}
-
 #[inline]
-fn get_buckets<C: Character>(text: &[C], buckets: &mut [i32], characters: usize, end: bool) {
-    buckets.fill(0);
+fn get_buckets<C: Character, I: Signed + NumAssign + Copy>(text: &[C], buckets: &mut [I], characters: usize, end: bool) {
+    buckets.fill(I::zero());
     assert!(buckets.len() == characters);
 
     for &c in text {
-        buckets[c.to_usize()] += 1;
+        buckets[c.to_usize()] += I::one();
     }
 
-    let mut sum = 0;
+    let mut sum = I::zero();
 
     if end {
         for c in buckets {
@@ -54,13 +30,278 @@ fn get_buckets<C: Character>(text: &[C], buckets: &mut [i32], characters: usize,
     }
 }
 
+fn induce_sa_and_lcp_generalized<C: Character>(
+    text: &[C],
+    suffix_array: &mut [i32],
+    lcp: &mut [i32],
+    buckets: &mut [i32],
+    separator: C,
+    alpha_size: usize,
+) {
+    let n = suffix_array.len();
+    // mark the positions of the L/S seam in each bucket
+    for i in separator.to_usize() + 1..alpha_size {
+        let pos = buckets[i] as usize;
+        if pos < n && suffix_array[pos] != i32::MAX {
+            lcp[pos] = i32::MAX;
+        }
+    }
+
+    get_buckets(text, buckets, alpha_size, false);
+
+    // Document separator is at the end of the string, we no
+    // longer need to do this since the get skipped anyway
+    let mut j = n as i32 - 1;
+    let mut c1 = text[j as usize];
+    let mut pos = buckets[c1.to_usize()] as usize;
+    let mut rmq = StackRMQ::new(alpha_size, false);
+
+    // suffix_array[pos] = if j > 0 && text[j as usize - 1] < c1 {
+    //     !j
+    // } else {
+    //     j
+    // };
+    // pos += 1;
+
+    for i in 0..n {
+        if suffix_array[i] == i32::MAX {
+            continue;
+        }
+
+        j = suffix_array[i];
+        suffix_array[i] = !j;
+
+        if lcp[i] == i32::MAX {
+            // we've encountered an L/S seam calculate LCP by direct comparison
+            let s1 = if suffix_array[i] < 0 {
+                !suffix_array[i]
+            } else {
+                suffix_array[i]
+            };
+            // find the position of the last L-type suffix placed in this c-bucket.
+            let c0 = text[s1 as usize];
+            let k = if c0 == c1 {
+                pos - 1
+            } else {
+                buckets[c0.to_usize()] as usize - 1
+            };
+            let s2 = if suffix_array[k] < 0 {
+                !suffix_array[k]
+            } else {
+                suffix_array[k]
+            };
+            let iter1 = text[s1 as usize..].iter();
+            let iter2 = text[s2 as usize..].iter();
+
+            lcp[i] = iter1.zip(iter2).take_while(|(&a, &b)| a == b).count() as i32;
+            lcp[k] = !lcp[k];
+        }
+
+        rmq.push(i, lcp[i]);
+
+        if j > 0 {
+            j -= 1;
+
+            let c0 = text[j as usize];
+
+            if c0 == separator {
+                continue;
+            }
+
+            if c0 != c1 {
+                buckets[c1.to_usize()] = pos as i32;
+                c1 = c0;
+                pos = buckets[c1.to_usize()] as usize;
+            }
+
+            suffix_array[pos] = if j > 0 && text[j as usize - 1] < c1 {
+                !j
+            } else {
+                j
+            };
+
+            let min_lcp = rmq.get_min(c0, i);
+            lcp[pos] = min_lcp;
+            pos += 1;
+        }
+    }
+
+    get_buckets(text, buckets, alpha_size, true);
+    c1 = C::zero();
+    pos = buckets[c1.to_usize()] as usize;
+    rmq.reset_for_type(true);
+
+    for i in (0..n).rev() {
+        let mut j = suffix_array[i];
+
+        if j > 0 {
+            j -= 1;
+
+            let c0 = text[j as usize];
+
+            if c0 == separator {
+                continue;
+            }
+
+            let min_lcp = rmq.get_min(c0, i);
+
+            if c0 != c1 {
+                buckets[c1.to_usize()] = pos as i32;
+                c1 = c0;
+                pos = buckets[c1.to_usize()] as usize;
+            }
+            pos -= 1;
+            suffix_array[pos] = if j == 0 || text[j as usize - 1] > c1 {
+                !j
+            } else {
+                j
+            };
+
+            lcp[pos + 1] = min_lcp;
+        } else {
+            suffix_array[i] = !j;
+        }
+
+        if i > 0 && lcp[i - 1] < 0 {
+            // We have encountered an L/S seam when placing the first S-type suffix.
+            // Calculate the LCP by direct comparison.
+            let s1 = if suffix_array[i] < 0 {
+                suffix_array[i]
+            } else {
+                suffix_array[i]
+            } as usize;
+            let s2 = if suffix_array[i - 1] < 0 {
+                !suffix_array[i - 1]
+            } else {
+                suffix_array[i - 1]
+            } as usize;
+            let iter1 = text[s1..].iter();
+            let iter2 = text[s2..].iter();
+
+            lcp[i] = iter1.zip(iter2).take_while(|(&a, &b)| a == b).count() as i32;
+            lcp[i - 1] = !lcp[i - 1];
+        }
+
+        rmq.push(i, lcp[i]);
+    }
+}
+
+fn induce_sa_generalized<C: Character>(
+    text: &[C],
+    suffix_array: &mut [i32],
+    buckets: &mut [i32],
+    separator: C,
+    alpha_size: usize,
+    induce_lms: bool,
+) {
+    get_buckets(text, buckets, alpha_size, false);
+
+    let n = suffix_array.len();
+    // Document separator is at the end of the string, we no
+    // longer need to do this since the get skipped anyway
+    let mut j = n as i32 - 1;
+    let mut c1 = text[j as usize];
+    let mut pos = buckets[separator.to_usize()] as usize;
+
+    // suffix_array[pos] = if j > 0 && text[j as usize - 1] < c1 {
+    //     !j
+    // } else {
+    //     j
+    // };
+    // pos += 1;
+    // let mut k = 0;
+    // for i in 0..n {
+    //     let j = suffix_array[i];
+    //     // suffix_array[i] = !j;
+    //     c1 = text[j as usize];
+    //     if c1 != separator {
+    //         break;
+    //     }
+    //     let c0 = text[j as usize - 1];
+    //     suffix_array[buckets[c0.to_usize()] as usize] = j - 1;
+    //     buckets[c0.to_usize()] += 1;
+    //     k = 3;
+    // }
+
+    // get_buckets(text, buckets, alpha_size, false);
+
+    for i in 0..n {
+        j = suffix_array[i];
+        suffix_array[i] = !j;
+
+        if j > 0 {
+            // if suffix_array[i] < 0 && induce_lms {
+            //     continue;
+            // }
+
+            j -= 1;
+
+            // if induce_lms {
+            //     suffix_array[i] = 0;
+            // }
+            let c0 = text[j as usize];
+
+            if c0 == separator {
+                continue;
+            }
+
+            if c0 != c1 {
+                buckets[c1.to_usize()] = pos as i32;
+                c1 = c0;
+                pos = buckets[c1.to_usize()] as usize;
+            }
+
+            suffix_array[pos] = if j > 0 && text[j as usize - 1] < c1 {
+                !j
+            } else {
+                j
+            };
+            pos += 1;
+        }
+    }
+
+    get_buckets(text, buckets, alpha_size, true);
+    c1 = C::zero();
+    pos = buckets[c1.to_usize()] as usize;
+
+    for i in (0..n).rev() {
+        let mut j = suffix_array[i];
+
+        if j > 0 {
+            j -= 1;
+            let c0 = text[j as usize];
+
+            if c0 == separator {
+                continue;
+            }
+
+            // if induce_lms {
+            //     suffix_array[i] = 0;
+            // }
+
+            if c0 != c1 {
+                buckets[c1.to_usize()] = pos as i32;
+                c1 = c0;
+                pos = buckets[c1.to_usize()] as usize;
+            }
+            pos -= 1;
+            suffix_array[pos] = if j == 0 || text[j as usize - 1] > c1 {
+                !j
+            } else {
+                j
+            };
+        } else {
+            suffix_array[i] = !j;
+        }
+    }
+}
+
 #[inline]
 fn induce_sa<C: Character + Debug>(
     text: &[C],
     suffix_array: &mut [i32],
     buckets: &mut [i32],
     alpha_size: usize,
-    suffix: bool
 ) {
     get_buckets(text, buckets, alpha_size, false);
 
@@ -126,6 +367,324 @@ fn induce_sa<C: Character + Debug>(
     }
 }
 
+fn sort_lms_substrings_generalized<C: Character>(
+    text: &[C],
+    suffix_array: &mut [i32],
+    separator: C,
+    buckets: &mut [i32],
+    alphabet_size: usize,
+) -> usize {
+    get_buckets(text, buckets, alphabet_size, true);
+    let n = text.len();
+    suffix_array.fill(0);
+
+    buckets[separator.to_usize()] -= 1;
+    suffix_array[buckets[separator.to_usize()] as usize] = n as i32 - 1;
+
+    // place the LMS suffixes in the end of their buckets
+    let mut c1 = text[n - 1];
+    let mut s_type = false;
+    let mut prev_lms_pos = n - 1;
+
+    for i in (0..n - 1).rev() {
+        let c0 = text[i];
+        if c0 < c1 {
+            s_type = true;
+        } else if c0 > c1 && s_type {
+            // remove the LMS suffix that induces the separator
+            if c1 == separator {
+                suffix_array[buckets[text[prev_lms_pos].to_usize()] as usize] = 0;
+                buckets[text[prev_lms_pos].to_usize()] += 1;
+            }
+            buckets[c1.to_usize()] -= 1;
+            suffix_array[buckets[c1.to_usize()] as usize] = (i + 1) as i32;
+            prev_lms_pos = i + 1;
+            s_type = false;
+        }
+        c1 = c0;
+    }
+    // induce S and L type suffixes
+    induce_sa_generalized(text, suffix_array, buckets, separator, alphabet_size, true);
+
+    let mut pos = 0;
+    for (i, &c) in text.iter().enumerate() {
+        if c == separator {
+            suffix_array[pos] = i as i32;
+            pos += 1;
+        }
+    }
+
+    // Store the sorted LMS-substrings in the first m items of SA
+    let mut lms_substring_count: usize = 0;
+    for i in 0..n {
+        let pos = suffix_array[i];
+        let c0 = text[pos as usize];
+
+        if pos > 0 {
+            // if c0 == separator {
+            //     lms_substring_count +=1;
+            //     continue;
+            // }
+            if text[pos as usize - 1] > c0 {
+                let mut j = pos as usize + 1;
+
+                while j < n {
+                    c1 = text[j];
+
+                    if c0 != c1 {
+                        break;
+                    }
+
+                    j += 1;
+                }
+
+                if j < n && c0 < c1 {
+                    suffix_array[lms_substring_count] = pos;
+                    lms_substring_count += 1;
+                }
+            }
+        }
+    }
+
+    lms_substring_count
+}
+
+fn name_lms_substrings_generalized<C: Character>(
+    text: &[C],
+    suffix_array: &mut [i32],
+    num_lms_substrings: usize,
+    lcp: &mut [i32],
+    separator: C,
+) -> usize {
+    let n = text.len();
+    let mut name_count = 0;
+    {
+        let (sa, name_buffer) = suffix_array.split_at_mut(num_lms_substrings);
+        name_buffer.fill(0);
+
+        let mut j = n - 1;
+        let mut c1 = text[j];
+        let mut is_stype = false;
+
+        for i in (0..n - 1).rev() {
+            let c0 = text[i];
+            if c0 < c1 {
+                is_stype = true;
+            } else if c0 > c1 && is_stype {
+                name_buffer[(i + 1) >> 1] = (j - i) as i32;
+                is_stype = false;
+                j = i + 1;
+            }
+            c1 = c0;
+        }
+
+        let mut prev_pos = n;
+        let mut prev_len = 0;
+
+        for i in 0..num_lms_substrings {
+            let curr_pos = sa[i] as usize;
+            let curr_len = name_buffer[curr_pos >> 1] as usize;
+            let mut diff = false;
+            let iter1 = text[curr_pos..curr_pos + curr_len].iter();
+            let iter2 = text[prev_pos..prev_pos + prev_len].iter();
+            let curr_lcp = iter1
+                .zip(iter2)
+                .take_while(|(&a, &b)| a == b && (a != separator || b != separator))
+                .count();
+
+            if prev_len != curr_len || curr_lcp < curr_len {
+                diff = true;
+            }
+
+            if diff {
+                name_count += 1;
+                prev_pos = curr_pos;
+                prev_len = curr_len;
+            }
+
+            if lcp.len() > 0 {
+                lcp[i] = curr_lcp as i32;
+            }
+            name_buffer[curr_pos >> 1] = name_count as i32;
+        }
+    }
+
+    name_count
+}
+
+pub fn gsais<C: Character>(
+    text: &[C],
+    mut suffix_array: &mut [i32],
+    separator: C,
+    alphabet_size: usize,
+    free_space: usize,
+) {
+    let n = text.len();
+    let buckets;
+    if alphabet_size <= free_space {
+        (suffix_array, buckets) = suffix_array.split_at_mut(suffix_array.len() - alphabet_size);
+    } else {
+        buckets = unsafe {
+            let ptr = vec![0i32; alphabet_size].as_mut_ptr();
+            std::slice::from_raw_parts_mut(ptr, alphabet_size)
+        }
+    }
+
+    let num_lms_substrings =
+        sort_lms_substrings_generalized(text, suffix_array, separator, buckets, alphabet_size);
+    let name_count =
+        name_lms_substrings_generalized(text, suffix_array, num_lms_substrings, &mut [], separator);
+
+    if (name_count as usize) < num_lms_substrings {
+        let mut j = suffix_array.len() - 1;
+
+        for i in (num_lms_substrings..n).rev() {
+            if suffix_array[i] != 0 {
+                suffix_array[j] = suffix_array[i] - 1;
+                j = j.saturating_sub(1);
+            }
+        }
+
+        let (suffix_array, reduced_text) =
+            suffix_array.split_at_mut(suffix_array.len() - num_lms_substrings);
+        let free_space = free_space + n - num_lms_substrings * 2;
+
+        sais(reduced_text, suffix_array, name_count as usize, free_space);
+
+        let mut j = num_lms_substrings;
+        let mut c1 = text[n - 1];
+        let mut s_type = false;
+
+        for i in (0..n - 1).rev() {
+            let c0 = text[i];
+            if c0 < c1 {
+                s_type = true;
+            } else if c0 > c1 && s_type {
+                reduced_text[j - 1] = i as i32 + 1;
+                j -= 1;
+                s_type = false;
+            }
+            c1 = c0;
+        }
+
+        for i in 0..num_lms_substrings {
+            suffix_array[i] = reduced_text[suffix_array[i] as usize];
+        }
+    }
+
+    get_buckets(text, buckets, alphabet_size, true);
+    buckets[separator.to_usize()] -= 1;
+    let separator_pos = buckets[separator.to_usize()] as usize;
+    suffix_array[num_lms_substrings..].fill(0);
+    for i in (0..num_lms_substrings).rev() {
+        let j = suffix_array[i];
+        let c = text[j as usize].to_usize();
+        suffix_array[i] = 0;
+        buckets[c] -= 1;
+        suffix_array[buckets[c] as usize] = j;
+    }
+
+    suffix_array[separator_pos] = n as i32 - 1;
+    induce_sa_generalized(text, suffix_array, buckets, separator, alphabet_size, false);
+}
+
+pub fn gsais_lcp<C: Character>(
+    text: &[C],
+    mut suffix_array: &mut [i32],
+    lcp: &mut [i32],
+    separator: C,
+    alphabet_size: usize,
+    free_space: usize,
+) {
+    let n = text.len();
+    let buckets;
+    if alphabet_size <= free_space {
+        (suffix_array, buckets) = suffix_array.split_at_mut(suffix_array.len() - alphabet_size);
+    } else {
+        buckets = unsafe {
+            let ptr = vec![0i32; alphabet_size].as_mut_ptr();
+            std::slice::from_raw_parts_mut(ptr, alphabet_size)
+        }
+    }
+
+    let num_lms_substrings =
+        sort_lms_substrings_generalized(text, suffix_array, separator, buckets, alphabet_size);
+    let name_count =
+        name_lms_substrings_generalized(text, suffix_array, num_lms_substrings, lcp, separator);
+
+    let mut j = suffix_array.len() - 1;
+    for i in (num_lms_substrings..n).rev() {
+        if suffix_array[i] != 0 {
+            suffix_array[j] = suffix_array[i];
+            j = j.saturating_sub(1);
+        }
+    }
+
+    if (name_count as usize) < num_lms_substrings {
+        let (suffix_array, reduced_text) =
+            suffix_array.split_at_mut(suffix_array.len() - num_lms_substrings);
+
+        let free_space = free_space + n - num_lms_substrings * 2;
+
+        sais(reduced_text, suffix_array, name_count + 1, free_space);
+
+        let mut j = num_lms_substrings;
+        let mut c1 = text[n - 1];
+        let mut s_type = false;
+
+        for i in (0..n - 1).rev() {
+            let c0 = text[i];
+            if c0 < c1 {
+                s_type = true;
+            } else if c0 > c1 && s_type {
+                reduced_text[j - 1] = i as i32 + 1;
+                j -= 1;
+                s_type = false;
+            }
+            c1 = c0;
+        }
+
+        compute_lcp_phi_sparse(text, reduced_text, suffix_array, lcp, separator);
+
+        for i in 0..num_lms_substrings {
+            suffix_array[i] = reduced_text[suffix_array[i] as usize];
+        }
+    } else {
+        for i in 1..num_lms_substrings {
+            let s1 = text[suffix_array[i - 1] as usize..].iter();
+            let s2 = text[suffix_array[i] as usize..].iter();
+
+            let l = s1
+                .zip(s2)
+                .take_while(|(&a, &b)| a == b && !(a == separator && b == separator))
+                .count() as i32;
+            lcp[i] = l;
+        }
+    }
+
+    get_buckets(text, buckets, alphabet_size, true);
+    buckets[separator.to_usize()] -= 1;
+    let separator_pos = buckets[separator.to_usize()] as usize;
+
+    suffix_array[num_lms_substrings..].fill(i32::MAX);
+    lcp[num_lms_substrings..].fill(0);
+
+    for i in (0..num_lms_substrings).rev() {
+        let j = suffix_array[i];
+        let l = lcp[i];
+        let c = text[j as usize].to_usize();
+
+        suffix_array[i] = i32::MAX;
+        lcp[i] = 0;
+        buckets[c] -= 1;
+        suffix_array[buckets[c] as usize] = j;
+        lcp[buckets[c] as usize] = l;
+    }
+
+    suffix_array[separator_pos] = n as i32 - 1;
+    induce_sa_and_lcp_generalized(text, suffix_array, lcp, buckets, separator, alphabet_size);
+}
+
 fn sais<C: Character>(
     text: &[C],
     mut suffix_array: &mut [i32],
@@ -163,7 +722,7 @@ fn sais<C: Character>(
     }
 
     // induce S and L type suffixes
-    induce_sa(text, suffix_array, buckets, alphabet_size, false);
+    induce_sa(text, suffix_array, buckets, alphabet_size);
 
     // Store the sorted LMS-substrings in the first m items of SA
     let mut m: usize = 0;
@@ -267,7 +826,7 @@ fn sais<C: Character>(
             if c0 < c1 {
                 s_type = true;
             } else if c0 > c1 && s_type {
-                reduced_text[j-1] = i as i32 + 1;
+                reduced_text[j - 1] = i as i32 + 1;
                 j -= 1;
                 s_type = false;
             }
@@ -289,7 +848,7 @@ fn sais<C: Character>(
         suffix_array[buckets[c] as usize] = j;
     }
 
-    induce_sa(text, suffix_array, buckets, alphabet_size, true);
+    induce_sa(text, suffix_array, buckets, alphabet_size);
 }
 
 pub fn construct_suffix_array(text: impl AsRef<[u8]>, alphabet_size: usize) -> Vec<i32> {
@@ -313,9 +872,12 @@ pub fn construct_suffix_array(text: impl AsRef<[u8]>, alphabet_size: usize) -> V
 #[cfg(test)]
 mod tests {
     use super::construct_suffix_array;
+    use super::gsais;
+    use super::gsais_lcp;
 
     #[test]
     fn try_suffix_array() {
+        // let text = "TTCGGCGGTACATCAGTGGCAAATGCAGAACGTTTTCTGCGGGTTGCCGATATTCTGGAAAGCAATGCCAGGCAGGGGCAGGTGGCCACCGTCCTCTCTGCCCCCGCCAAAATCACCAACCATCTGGTAGCGATGATTGA";
         let text = "TTCGGCGGTACATCAGTGGCAAATGCAGAACGTTTTCTGCGGGTTGCCGATATTCTGGAAAGCAATGCCAGGCAGGGGCAGGTGGCCACCGTCCTCTCTGCCCCCGCCAAAATCACCAACCATCTGGTAGCGATGATTGA";
         let sa = construct_suffix_array(text, 256);
         let result = &[
@@ -329,5 +891,71 @@ mod tests {
         ];
 
         assert_eq!(&sa, result);
+    }
+
+    #[test]
+    fn test_gsais() {
+        // let text = "banana$bananabananabana$banananananananan$";
+        //LSLSLLSSLSLLSSLSLL
+        let text = "TTCGGCGGTACATCAGTGGCAAATGCAGAACGTTTTCTGCG$GGTTGCCGATATTCTGGAAAGCAATGCCAGGCAGGGGCAGGTGGCCAC$CGTCCTCTCTGCCCCC$GCCAAAATCACCAACCATCTGGTAGCGATGATTGA$";
+        // let text = "TTCGGCGGTACATCAGTGGCAAATGCAGAACGTTTTCTGCGGGTTGCCGATATTCTGGAAAGCAATGCCAGGCAGGGGCAGGTGGCCACCGTCCTCTCTGCCCCCGCCAAAATCACCAACCATCTGGTAGCGATGATTGA$";
+        let mut suffix_array = vec![0; text.len() + 1];
+        suffix_array[0] = text.len() as i32;
+        gsais(text.as_bytes(), &mut suffix_array[1..], b'$', 256, 0);
+        // let result = &[
+        //     18, 6, 12, 17, 5, 11, 9, 15, 3, 7, 13, 1, 10, 0, 16, 4, 8, 14, 2
+        // ];
+        let result = &[
+            144, 41, 90, 107, 143, 142, 111, 59, 112, 20, 120, 28, 60, 113, 21, 64, 88, 9, 117,
+            121, 29, 26, 61, 131, 70, 74, 80, 14, 50, 114, 11, 124, 135, 22, 65, 52, 138, 89, 106,
+            110, 19, 119, 63, 87, 116, 25, 69, 73, 79, 13, 10, 123, 105, 109, 118, 86, 68, 122,
+            104, 103, 102, 47, 94, 39, 48, 133, 2, 5, 91, 30, 95, 97, 99, 36, 55, 126, 40, 141, 58,
+            27, 49, 134, 137, 18, 62, 24, 72, 78, 108, 85, 67, 101, 46, 38, 132, 4, 57, 17, 71, 77,
+            84, 3, 76, 75, 6, 128, 81, 42, 7, 129, 92, 15, 82, 43, 31, 8, 130, 51, 115, 12, 93, 1,
+            96, 98, 35, 54, 125, 140, 136, 23, 66, 100, 45, 37, 56, 16, 83, 127, 0, 34, 53, 139,
+            44, 33, 32,
+        ];
+
+        assert_eq!(&suffix_array, result);
+    }
+
+    #[test]
+    fn test_gsais_lcp() {
+        // let text = "banana$anaba$anan$";
+        // let text = "banana$bananabananabana$banananananananan$";
+        let text = "TTCGGCGGTACATCAGTGGCAAATGCAGAACGTTTTCTGCG$GGTTGCCGATATTCTGGAAAGCAATGCCAGGCAGGGGCAGGTGGCCAC$CGTCCTCTCTGCCCCC$GCCAAAATCACCAACCATCTGGTAGCGATGATTGA$";
+        let mut suffix_array = vec![0; text.len() + 1];
+        let mut lcp = vec![0; suffix_array.len()];
+        suffix_array[0] = text.len() as i32;
+        gsais_lcp(
+            text.as_bytes(),
+            &mut suffix_array[1..],
+            &mut lcp[1..],
+            b'$',
+            256,
+            0,
+        );
+
+        let result = &[
+            0, 0, 0, 0, 0, 0, 1, 3, 3, 4, 2, 3, 2, 2, 3, 5, 1, 2, 2, 4, 2, 1, 2, 3, 2, 3, 3, 2, 1,
+            2, 4, 3, 2, 3, 4, 2, 3, 0, 1, 1, 4, 3, 3, 2, 3, 2, 3, 4, 4, 3, 2, 4, 1, 2, 4, 3, 3, 3,
+            2, 3, 4, 2, 2, 1, 2, 4, 2, 3, 2, 3, 1, 4, 2, 4, 3, 4, 0, 1, 2, 3, 2, 3, 3, 1, 4, 3, 4,
+            5, 2, 4, 4, 3, 3, 2, 3, 3, 1, 2, 4, 6, 3, 3, 2, 3, 2, 4, 3, 3, 1, 3, 2, 2, 5, 2, 3, 0,
+            2, 2, 1, 3, 2, 2, 2, 3, 5, 4, 5, 1, 3, 2, 3, 4, 4, 3, 2, 3, 4, 3, 1, 3, 5, 2, 3, 2, 3,
+        ];
+        assert_eq!(&lcp, result);
+
+        let result = &[
+            144, 41, 90, 107, 143, 142, 111, 59, 112, 20, 120, 28, 60, 113, 21, 64, 88, 9, 117,
+            121, 29, 26, 61, 131, 70, 74, 80, 14, 50, 114, 11, 124, 135, 22, 65, 52, 138, 89, 106,
+            110, 19, 119, 63, 87, 116, 25, 69, 73, 79, 13, 10, 123, 105, 109, 118, 86, 68, 122,
+            104, 103, 102, 47, 94, 39, 48, 133, 2, 5, 91, 30, 95, 97, 99, 36, 55, 126, 40, 141, 58,
+            27, 49, 134, 137, 18, 62, 24, 72, 78, 108, 85, 67, 101, 46, 38, 132, 4, 57, 17, 71, 77,
+            84, 3, 76, 75, 6, 128, 81, 42, 7, 129, 92, 15, 82, 43, 31, 8, 130, 51, 115, 12, 93, 1,
+            96, 98, 35, 54, 125, 140, 136, 23, 66, 100, 45, 37, 56, 16, 83, 127, 0, 34, 53, 139,
+            44, 33, 32,
+        ];
+
+        assert_eq!(&suffix_array, result);
     }
 }
