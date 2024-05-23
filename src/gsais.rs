@@ -837,22 +837,33 @@ fn sais<C: Character, I: Index>(
     induce_sa(text, suffix_array, buckets, alphabet_size);
 }
 
-pub fn construct_suffix_array(text: impl AsRef<[u8]>, alphabet_size: usize) -> Vec<i32> {
+pub fn construct_suffix_array<C: Character, I: Index>(text: impl AsRef<[C]>, suffix_array: Option<&mut [I]>, lcp: Option<&mut [I]>, separator: Option<C>, alphabet_size: usize) {
     let text = text.as_ref();
     let n = text.len();
 
-    if n == 0 {
-        return vec![];
+    if text.len() == 0 {
+        return;
     }
 
-    let mut suffix_array = vec![0; n + 1];
-    suffix_array[0] = n as i32;
+    suffix_array.as_ref().map(|sa| assert!(sa.len() == n + 1));
+    lcp.as_ref().map(|lcp| assert!(lcp.len() == n + 1));
 
-    if n > 1 {
-        sais(text, &mut suffix_array[1..], alphabet_size, 0);
-    }
-
-    suffix_array
+    match (suffix_array, lcp, separator) {
+        (Some(sa), Some(lcp), Some(separator)) => {
+            gsais_lcp(text, &mut sa[1..], &mut lcp[1..], separator, alphabet_size, 0);
+            sa[0] = I::from(n).unwrap();
+            lcp[0] = I::ZERO;
+        },
+        (Some(sa), None, Some(separator)) => {
+            gsais(text, &mut sa[1..], separator, alphabet_size, 0);
+            sa[0] = I::from(n).unwrap();
+        },
+        (Some(sa), None, None) => {
+            sais(text, &mut sa[1..], alphabet_size, 0);
+            sa[0] = I::from(n).unwrap();
+        },
+        (_, _, _) => { unimplemented!() }
+    };
 }
 
 #[cfg(test)]
@@ -865,7 +876,8 @@ mod tests {
     fn try_suffix_array() {
         // let text = "TTCGGCGGTACATCAGTGGCAAATGCAGAACGTTTTCTGCGGGTTGCCGATATTCTGGAAAGCAATGCCAGGCAGGGGCAGGTGGCCACCGTCCTCTCTGCCCCCGCCAAAATCACCAACCATCTGGTAGCGATGATTGA";
         let text = "TTCGGCGGTACATCAGTGGCAAATGCAGAACGTTTTCTGCGGGTTGCCGATATTCTGGAAAGCAATGCCAGGCAGGGGCAGGTGGCCACCGTCCTCTCTGCCCCCGCCAAAATCACCAACCATCTGGTAGCGATGATTGA";
-        let sa = construct_suffix_array(text, 256);
+        let mut sa = vec![0; text.len() + 1];
+        construct_suffix_array(text, Some(&mut sa), None, None, 256);
         let result = &[
             140, 139, 108, 58, 109, 20, 117, 28, 59, 110, 21, 63, 9, 114, 118, 87, 29, 26, 60, 128,
             69, 73, 79, 14, 49, 111, 11, 121, 132, 22, 64, 51, 135, 107, 19, 116, 62, 113, 86, 25,
