@@ -36,7 +36,7 @@ struct TempFiles {
 
 impl TempFiles {
     fn new(basename: &Path) -> TempFiles {
-        let files = [".parse", ".last", ".dict", ".occ"]
+        let files = ["parse", "last", "dict", "occ"]
             .iter()
             .map(|e| TempFiles::open_file(basename.with_extension(e)))
             .collect::<Vec<_>>();

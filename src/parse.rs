@@ -1,6 +1,8 @@
-use crate::gsacak_c::{gsacak_u8, sacak_u32};
+use crate::gsais;
+// use crate::gsacak_c::{gsacak_u8, sacak_u32};
 
 use byteorder::{NativeEndian, ReadBytesExt, WriteBytesExt};
+use bytemuck::cast_slice_mut;
 
 use std::cmp::{Ordering, PartialEq, PartialOrd, Reverse};
 use std::collections::BinaryHeap;
@@ -49,19 +51,22 @@ impl<'a> Parse<'a> {
     }
 
     fn read_parse(&mut self) {
-        read_file_into_vec_u32(self.basename.with_extension(".parse"), &mut self.parse);
+        read_file_into_vec_u32(self.basename.with_extension("parse"), &mut self.parse);
     }
 
     fn compute_suffix_array(&mut self) {
         self.bwt.resize(self.parse.len(), 0);
 
-        unsafe {
-            sacak_u32(&self.parse, &mut self.bwt);
-        }
+        // unsafe {
+        //     sacak_u32(&self.parse, &mut self.bwt);
+        // }
+        let alphabet_size = self.parse.iter().copied().max().unwrap() as usize + 1;
+        let suffix_array = cast_slice_mut::<u32, i32>(&mut self.bwt);
+        gsais::construct_suffix_array(&self.parse[..(self.parse.len() - 1)], Some(suffix_array), None, None, alphabet_size);
     }
 
     pub fn transform_text_into_bwt(&mut self) {
-        let mut output = File::create(self.basename.with_extension(".bwlast"))
+        let mut output = File::create(self.basename.with_extension("bwlast"))
             .map(BufWriter::new)
             .unwrap();
 
@@ -72,7 +77,7 @@ impl<'a> Parse<'a> {
         {
             self.bwt[0] = self.parse[n - 1];
             let mut last = vec![0; n];
-            read_file_into_vec_u8(self.basename.with_extension(".last"), &mut last);
+            read_file_into_vec_u8(self.basename.with_extension("last"), &mut last);
             output.write(&[last[n - 2]]).unwrap();
 
             for i in 1..=n {
@@ -95,7 +100,7 @@ impl<'a> Parse<'a> {
         let &alphabet_size = self.parse[0..n].iter().max().unwrap();
         let mut occ = vec![0; alphabet_size as usize + 1];
 
-        read_file_into_vec_u32(self.basename.with_extension(".occ"), &mut occ);
+        read_file_into_vec_u32(self.basename.with_extension("occ"), &mut occ);
         occ.rotate_right(1);
         occ[0] = 1;
 
@@ -113,7 +118,7 @@ impl<'a> Parse<'a> {
             frequency_vector[bwt_char] += 1;
         }
 
-        let mut output = File::create(self.basename.with_extension(".ilist"))
+        let mut output = File::create(self.basename.with_extension("ilist"))
             .map(BufWriter::new)
             .unwrap();
         let result = ilist
@@ -131,8 +136,13 @@ fn compute_suffix_array_and_lcp(dictionary: &[u8]) -> (Vec<u32>, Vec<i32>) {
     sa.resize(dictionary.len(), 0);
     lcp.resize(dictionary.len(), 0);
 
-    unsafe {
-        gsacak_u8(dictionary, &mut sa, Some(&mut lcp));
+    // unsafe {
+    //     gsacak_u8(dictionary, &mut sa, Some(&mut lcp));
+    // }
+
+    {
+        let mut sa = cast_slice_mut::<u32, i32>(&mut sa);
+        gsais::construct_suffix_array(&dictionary[..(dictionary.len() - 1)], Some(&mut sa), Some(&mut lcp), Some(END_OF_WORD), 256);
     }
 
     (sa, lcp)
@@ -143,7 +153,11 @@ fn get_suffix_length(suffix: u32, suffix_array: &[u32]) -> (u32, usize) {
         .binary_search(&suffix)
         .err()
         .expect("suffix was found in suffix array");
-    let ret = if pos == suffix_array.len() { (0, 0) } else { (suffix_array[pos] - suffix, pos) };
+    let ret = if pos == suffix_array.len() {
+        (0, 0)
+    } else {
+        (suffix_array[pos] - suffix, pos)
+    };
 
     ret
 }
@@ -159,18 +173,18 @@ pub struct PFBwt {
 impl PFBwt {
     pub fn new(basename: &Path) -> PFBwt {
         let mut dictionary = Vec::new();
-        read_file_into_vec_u8(basename.with_extension(".dict"), &mut dictionary);
+        read_file_into_vec_u8(basename.with_extension("dict"), &mut dictionary);
         dictionary.truncate(dictionary.len() - 1);
 
         let mut istart = Vec::new();
-        read_file_into_vec_u32(basename.with_extension(".occ"), &mut istart);
+        read_file_into_vec_u32(basename.with_extension("occ"), &mut istart);
 
         let mut ilist = Vec::new();
-        read_file_into_vec_u32(basename.with_extension(".ilist"), &mut ilist);
+        read_file_into_vec_u32(basename.with_extension("ilist"), &mut ilist);
         ilist.truncate(ilist.len() - 1);
 
         let mut bwlast = Vec::new();
-        read_file_into_vec_u8(basename.with_extension(".bwlast"), &mut bwlast);
+        read_file_into_vec_u8(basename.with_extension("bwlast"), &mut bwlast);
         bwlast.truncate(bwlast.len() - 1);
 
         let mut last = 1;
@@ -178,7 +192,7 @@ impl PFBwt {
             (*occ, last) = (last, last + *occ);
         }
 
-        let bwt_file = File::create(basename.with_extension(".bwt"))
+        let bwt_file = File::create(basename.with_extension("bwt"))
             .map(BufWriter::new)
             .unwrap();
 
