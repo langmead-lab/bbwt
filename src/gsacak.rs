@@ -26,9 +26,9 @@ pub fn get_buckets(counts: &[u32], buckets: &mut [u32], end: bool) {
     for (count, bucket) in counts.iter().zip(buckets.iter_mut()) {
         if end {
             sum += count;
-            *bucket = sum - 1;
-        } else {
             *bucket = sum;
+        } else {
+            *bucket = sum + 1;
             sum += count;
         }
     }
@@ -42,7 +42,7 @@ fn put_lms_substring_level0(
 ) {
     let n = text.len();
     let mut previous_is_s_type = false;
-    for i in (1..(n - 1)).rev() {
+    for i in (1..n).rev() {
         let &c1 = table.get(&text[i - 1]).unwrap();
         let &c2 = table.get(&text[i]).unwrap();
 
@@ -54,7 +54,7 @@ fn put_lms_substring_level0(
         previous_is_s_type = current_is_s_type;
     }
 
-    suffix_array[0] = (n as u32) - 1;
+    suffix_array[0] = n as u32;
 }
 
 fn put_lms_substring_leveln(text: &[u32], suffix_array: &mut [u32]) {
@@ -134,7 +134,7 @@ fn put_suffix_level0(
         suffix_array[buckets[c] as usize] = j as u32;
         buckets[c] -= 1;
     }
-    suffix_array[0] = text.len() as u32 - 1;
+    suffix_array[0] = text.len() as u32;
 }
 
 fn induce_l_type_level0(
@@ -144,15 +144,24 @@ fn induce_l_type_level0(
     table: &Table,
     suffix: bool,
 ) {
-    let n = text.len() - 1;
+    let n = suffix_array.len();
 
-    for i in 0..n {
+    // The input does not include the sentinel, so we
+    // induce the first L-type suffix outside the loop.
+    let mut j = (suffix_array[0] - 1) as usize;
+    let mut c1 = table.get(&text[j]).unwrap();
+    suffix_array[buckets[*c1] as usize] = j as u32;
+    buckets[*c1] += 1;
+
+    for i in 1..n {
         if suffix_array[i] == 0 {
             continue;
         }
-        let j = (suffix_array[i] - 1) as usize;
-        let c1 = table.get(&text[j]).unwrap();
+
+        j = (suffix_array[i] - 1) as usize;
+        c1 = table.get(&text[j]).unwrap();
         let c2 = table.get(&text[j + 1]).unwrap();
+
         if *c1 >= *c2 {
             suffix_array[buckets[*c1] as usize] = j as u32;
             buckets[*c1] += 1;
@@ -170,7 +179,7 @@ fn induce_s_type_level0(
     table: &Table,
     suffix: bool,
 ) {
-    let n = text.len();
+    let n = suffix_array.len();
 
     for i in (1..n).rev() {
         if suffix_array[i] == 0 {
@@ -339,7 +348,7 @@ fn induce_s_type_leveln(text: &[u32], suffix_array: &mut [u32], suffix: bool) {
     }
 }
 
-fn name_lms_substrings<T: PartialOrd + Debug>(
+fn name_lms_substrings<T: PartialOrd>(
     text: &[T],
     suffix_array: &mut [u32],
     n1: usize,
@@ -357,7 +366,9 @@ fn name_lms_substrings<T: PartialOrd + Debug>(
         for i in 0..n1 {
             let position = suffix_array1[i] as usize;
             let length = get_length_of_lms_substring(&text[position..]);
-            let diff = length != pre_length
+            // The first LMS string will always be the virtual sentinel which is
+            // a zero length string and is different from any other LMS string.
+            let diff = length == 0 || length != pre_length
                 || text[position..position + length] != text[pre_position..pre_position + length];
 
             if diff {
@@ -397,8 +408,7 @@ fn name_lms_substrings<T: PartialOrd + Debug>(
     name_counter
 }
 
-use std::fmt::Debug;
-fn get_suffix_array_lms<T: PartialOrd + Debug>(
+fn get_suffix_array_lms<T: PartialOrd>(
     text: &[T],
     suffix_array: &mut [u32],
     text1: &mut [u32],
@@ -406,12 +416,12 @@ fn get_suffix_array_lms<T: PartialOrd + Debug>(
 ) {
     let n1 = text1.len();
     let mut j = n1 - 1;
-    let n = text.len();
+    let n = if level0 { text.len() } else { text.len() - 1 };
 
-    text1[j] = (n - 1) as u32;
+    text1[j] = n as u32;
     j = j.saturating_sub(1);
     let mut successor_is_s_type = false;
-    for i in (1..(n - 1)).rev() {
+    for i in (1..n).rev() {
         let current_is_s_type =
             text[i - 1] < text[i] || (text[i - 1] == text[i] && successor_is_s_type);
         if !current_is_s_type && successor_is_s_type {
@@ -431,8 +441,8 @@ fn get_suffix_array_lms<T: PartialOrd + Debug>(
 fn get_length_of_lms_substring<T: PartialOrd>(text: &[T]) -> usize {
     let n = text.len();
 
-    if n == 1 {
-        return 1;
+    if n < 2 {
+        return n;
     }
 
     let mut lms_length = 0;
@@ -558,7 +568,7 @@ pub fn sacak<T: AsRef<[u8]>>(text: T, table: Table) -> Vec<u32> {
     if text.len() <= 1 {
         Vec::new()
     } else {
-        let mut suffix_array = vec![0; text.len()];
+        let mut suffix_array = vec![0; text.len() + 1];
         sacak0(text, &mut suffix_array, table);
 
         suffix_array
@@ -572,16 +582,15 @@ mod tests {
     #[test]
     fn test_saca_k() {
         let map: Vec<(u8, usize)> = vec![
-            ('\0' as u8, 0),
-            ('A' as u8, 1),
-            ('C' as u8, 2),
-            ('G' as u8, 3),
-            ('T' as u8, 4),
-            ('N' as u8, 5),
+            ('A' as u8, 0),
+            ('C' as u8, 1),
+            ('G' as u8, 2),
+            ('T' as u8, 3),
+            ('N' as u8, 4),
         ];
 
         let table = map.into_iter().collect::<Table>();
-        let text = "TTCGGCGGTACATCAGTGGCAAATGCAGAACGTTTTCTGCGGGTTGCCGATATTCTGGAAAGCAATGCCAGGCAGGGGCAGGTGGCCACCGTCCTCTCTGCCCCCGCCAAAATCACCAACCATCTGGTAGCGATGATTGA\0";
+        let text = "TTCGGCGGTACATCAGTGGCAAATGCAGAACGTTTTCTGCGGGTTGCCGATATTCTGGAAAGCAATGCCAGGCAGGGGCAGGTGGCCACCGTCCTCTCTGCCCCCGCCAAAATCACCAACCATCTGGTAGCGATGATTGA";
 
         let sa = sacak(text, table);
         let result = &[
