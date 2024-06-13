@@ -44,8 +44,8 @@ impl KarpRabinHash {
         let mut hash: u64 = 0;
         let prime: u64 = 27162335252586509;
 
-        for c in b.as_ref() {
-            hash = (256 * hash + *c as u64) % prime;
+        for &c in b.as_ref() {
+            hash = (256 * hash + c as u64) % prime;
         }
 
         hash

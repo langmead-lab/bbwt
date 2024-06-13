@@ -50,7 +50,6 @@ impl<I: Index> StackRMQ<I> {
     pub(crate) fn push(&mut self, index: usize, lcp: I) {
         self.remove_stale_lcps(lcp);
         self.stack.push(LCPEntry { index, lcp });
-        dbg!(&self.stack);
     }
 
     pub(crate) fn get_min<C: Character>(&mut self, character: C, index: usize) -> I {
@@ -99,13 +98,16 @@ impl<I: Index> StackRMQ<I> {
     fn shrink_stack(&mut self) {
         let mut cur = 0;
         let mut end = 0;
-        let empty_occ = if self.s_type { usize::MAX } else { usize::MIN };
+        let empty_occ = if self.s_type { usize::MIN } else { usize::MAX };
         self.sorted_occ.extend_from_slice(&self.last_occ);
         self.sorted_occ.sort_by(self.cmp);
 
         for &occ in &self.sorted_occ {
             if occ == empty_occ {
                 continue;
+            }
+            if end >= self.stack.len() {
+                break;
             }
             if self.stack[end].index < occ {
                 cur += self.stack[cur..]
@@ -118,6 +120,9 @@ impl<I: Index> StackRMQ<I> {
                 self.stack[end] = self.stack[cur];
                 end += 1;
                 cur += 1;
+            } else {
+                end = 0;
+                break;
             }
         }
 
